@@ -18,7 +18,6 @@ package com.google.android.gms.oss.licenses.plugin
 
 import groovy.json.JsonSlurper
 import org.gradle.api.DefaultTask
-import org.gradle.api.file.FileTree
 import org.gradle.api.tasks.InputFile
 import org.gradle.api.tasks.OutputDirectory
 import org.gradle.api.tasks.OutputFile
@@ -72,14 +71,14 @@ class LicensesTask extends DefaultTask {
         for (entry in allDependencies) {
             String group = entry.group
             String name = entry.name
-            String fileLocation = entry.fileLocation
+            String pomFileLocation = entry.pomFileLocation
+            File artifactLocation = new File(entry.fileLocation)
             String version = entry.version
-            File artifactLocation = new File(fileLocation)
 
             if (isGoogleServices(group, name)) {
                 // Add license info for google-play-services itself
                 if (!name.endsWith(LICENSE_ARTIFACT_SURFIX)) {
-                    addLicensesFromPom(artifactLocation, name, group)
+                    addLicensesFromPom(group, name, pomFileLocation)
                 }
                 // Add transitive licenses info for google-play-services. For
                 // post-granular versions, this is located in the artifact
@@ -92,7 +91,7 @@ class LicensesTask extends DefaultTask {
                     addGooglePlayServiceLicenses(artifactLocation)
                 }
             } else {
-                addLicensesFromPom(artifactLocation, name, group)
+                addLicensesFromPom(group, name, pomFileLocation)
             }
         }
 
@@ -109,13 +108,13 @@ class LicensesTask extends DefaultTask {
         if (licenses == null) {
             println("not defined licenses")
         }
-        licenses.newWriter().withWriter {w ->
+        licenses.newWriter().withWriter { w ->
             w << ''
         }
     }
 
     protected void initLicensesMetadata() {
-        licensesMetadata.newWriter().withWriter {w ->
+        licensesMetadata.newWriter().withWriter { w ->
             w << ''
         }
     }
@@ -125,7 +124,7 @@ class LicensesTask extends DefaultTask {
                 || FIREBASE_GROUP.equalsIgnoreCase(group))
     }
 
-    protected boolean isGranularVersion (String version) {
+    protected boolean isGranularVersion(String version) {
         String[] versions = version.split("\\.")
         return (versions.length > 0
                 && Integer.valueOf(versions[0]) >= GRANULAR_BASE_VERSION)
@@ -143,7 +142,7 @@ class LicensesTask extends DefaultTask {
         }
 
         Object licensesObj = jsonSlurper.parse(licensesZip.getInputStream(
-            jsonFile))
+                jsonFile))
         if (licensesObj == null) {
             return
         }
@@ -156,18 +155,18 @@ class LicensesTask extends DefaultTask {
             if (!googleServiceLicenses.contains(key)) {
                 googleServiceLicenses.add(key)
                 byte[] content = getBytesFromInputStream(
-                    licensesZip.getInputStream(txtFile),
-                    startValue,
-                    lengthValue)
+                        licensesZip.getInputStream(txtFile),
+                        startValue,
+                        lengthValue)
                 appendLicense(key, content)
             }
         }
     }
 
     protected byte[] getBytesFromInputStream(
-        InputStream stream,
-        long offset,
-        int length) {
+            InputStream stream,
+            long offset,
+            int length) {
         try {
             byte[] buffer = new byte[1024]
             ByteArrayOutputStream textArray = new ByteArrayOutputStream()
@@ -177,12 +176,12 @@ class LicensesTask extends DefaultTask {
             int bytes = 0
 
             while (bytesRemaining > 0
-                && (bytes =
-                stream.read(
-                    buffer,
-                    0,
-                    Math.min(bytesRemaining, buffer.length)))
-                != -1) {
+                    && (bytes =
+                    stream.read(
+                            buffer,
+                            0,
+                            Math.min(bytesRemaining, buffer.length)))
+                    != -1) {
                 textArray.write(buffer, 0, bytes)
                 bytesRemaining -= bytes
             }
@@ -194,31 +193,25 @@ class LicensesTask extends DefaultTask {
         }
     }
 
-    protected void addLicensesFromPom(File artifactFile, String artifactName,
-        String group) {
-        String pomFileName = artifactFile.getName().replaceFirst(FILE_EXTENSION,
-            ".pom")
+    protected void addLicensesFromPom(String group, String artifactName, String pomFileLocation) {
+        if (pomFileLocation == null) {
+            return
+        }
+        def rootNode = new XmlSlurper().parse(new File(pomFileLocation))
+        if (rootNode.licenses.size() == 0) {
+            return
+        }
 
-        // Search for pom file. When the artifact is cached in gradle cache, the
-        // pom file will be stored in a hashed directory.
-        FileTree tree = project.fileTree(
-            dir: artifactFile.parentFile.parentFile,
-            include: ["**/${pomFileName}", pomFileName])
-        for (File pomFile : tree) {
-            def rootNode = new XmlSlurper().parse(pomFile)
-            if (rootNode.licenses.size() == 0) continue
-
-            String licenseKey = "${group}:${artifactName}"
-            if (rootNode.licenses.license.size() > 1) {
-                rootNode.licenses.license.each { node ->
-                    String nodeName = node.name
-                    String nodeUrl = node.url
-                    appendLicense("${licenseKey} ${nodeName}", nodeUrl.getBytes(UTF_8))
-                }
-            } else {
-                String nodeUrl = rootNode.licenses.license.url
-                appendLicense(licenseKey, nodeUrl.getBytes(UTF_8))
+        String licenseKey = "${group}:${artifactName}"
+        if (rootNode.licenses.license.size() > 1) {
+            rootNode.licenses.license.each { node ->
+                String nodeName = node.name
+                String nodeUrl = node.url
+                appendLicense("${licenseKey} ${nodeName}", nodeUrl.getBytes(UTF_8))
             }
+        } else {
+            String nodeUrl = rootNode.licenses.license.url
+            appendLicense(licenseKey, nodeUrl.getBytes(UTF_8))
         }
     }
 

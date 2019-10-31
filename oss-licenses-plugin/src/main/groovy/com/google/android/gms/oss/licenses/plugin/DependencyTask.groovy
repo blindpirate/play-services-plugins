@@ -16,6 +16,7 @@
 
 package com.google.android.gms.oss.licenses.plugin
 
+import com.google.common.annotations.VisibleForTesting
 import groovy.json.JsonBuilder
 import groovy.json.JsonException
 import groovy.json.JsonSlurper
@@ -24,10 +25,17 @@ import org.gradle.api.artifacts.Configuration
 import org.gradle.api.artifacts.ConfigurationContainer
 import org.gradle.api.artifacts.ResolveException
 import org.gradle.api.artifacts.ResolvedArtifact
+import org.gradle.api.artifacts.dsl.DependencyHandler
+import org.gradle.api.artifacts.result.ArtifactResolutionResult
+import org.gradle.api.artifacts.result.ArtifactResult
+import org.gradle.api.artifacts.result.ResolvedArtifactResult
 import org.gradle.api.tasks.Input
+import org.gradle.api.tasks.Internal
 import org.gradle.api.tasks.OutputDirectory
 import org.gradle.api.tasks.OutputFile
 import org.gradle.api.tasks.TaskAction
+import org.gradle.maven.MavenModule
+import org.gradle.maven.MavenPomArtifact
 
 /**
  * This task does the following:
@@ -39,32 +47,35 @@ import org.gradle.api.tasks.TaskAction
  * artifacts.
  */
 class DependencyTask extends DefaultTask {
-    protected Set<String> artifactSet = []
-    protected Set<ArtifactInfo> artifactInfos = []
+    protected Set<ArtifactInfo> artifactInfos = [] as HashSet
     private static final String TEST_PREFIX = "test"
     private static final String ANDROID_TEST_PREFIX = "androidTest"
     private static final Set<String> TEST_COMPILE = ["testCompile",
                                                      "androidTestCompile"]
 
     private static final Set<String> PACKAGED_DEPENDENCIES_PREFIXES = ["compile",
-                                                            "implementation",
-                                                            "api"]
+                                                                       "implementation",
+                                                                       "api"]
 
     @Input
-    public ConfigurationContainer configurations
+    ConfigurationContainer configurations
 
     @OutputDirectory
-    public File outputDir
+    File outputDir
 
     @OutputFile
-    public File outputFile
+    File outputFile
+
+    @Internal
+    @VisibleForTesting
+    DependencyHandler dependencyHandler
 
     @TaskAction
     void action() {
         initOutput()
         updateDependencyArtifacts()
 
-        if (outputFile.exists() && checkArtifactSet(outputFile)) {
+        if (outputFile.exists() && checkArtifactInfoSet(outputFile)) {
             return
         }
 
@@ -79,48 +90,25 @@ class DependencyTask extends DefaultTask {
      * @return true if artifactSet is the same as the json file,
      * false otherwise
      */
-    protected boolean checkArtifactSet(File file) {
+    protected boolean checkArtifactInfoSet(File file) {
         try {
-            def previousArtifacts = new JsonSlurper().parse(file)
-            for (entry in previousArtifacts) {
-                String key = "${entry.fileLocation}"
-                if (artifactSet.contains(key)) {
-                    artifactSet.remove(key)
-                } else {
-                    return false
-                }
-            }
-            return artifactSet.isEmpty()
+            Set<ArtifactInfo> previousArtifacts = new JsonSlurper().parse(file)
+                    .collect {
+                        new ArtifactInfo(it.group,
+                                it.name,
+                                it.version,
+                                it.pomLocation,
+                                it.fileLocation)
+                    } as HashSet
+            return previousArtifacts == artifactInfos
         } catch (JsonException exception) {
             return false
         }
     }
 
     protected void updateDependencyArtifacts() {
-        for (Configuration configuration : configurations) {
-            Set<ResolvedArtifact> artifacts = getResolvedArtifacts(
-                    configuration)
-            if (artifacts == null) {
-                continue
-            }
-
-            addArtifacts(artifacts)
-        }
-    }
-
-    protected addArtifacts(Set<ResolvedArtifact> artifacts) {
-        for (ResolvedArtifact artifact : artifacts) {
-            String group = artifact.moduleVersion.id.group
-            String artifact_key = artifact.file.getAbsolutePath()
-
-            if (artifactSet.contains(artifact_key)) {
-                continue
-            }
-
-            artifactSet.add(artifact_key)
-            artifactInfos.add(new ArtifactInfo(group, artifact.name,
-                    artifact.file.getAbsolutePath(),
-                    artifact.moduleVersion.id.version))
+        configurations.each {
+            artifactInfos.addAll(getResolvedArtifacts(it))
         }
     }
 
@@ -134,7 +122,7 @@ class DependencyTask extends DefaultTask {
      */
     protected boolean canBeResolved(Configuration configuration) {
         return configuration.metaClass.respondsTo(configuration,
-                "isCanBeResolved")? configuration.isCanBeResolved() : true
+                "isCanBeResolved") ? configuration.isCanBeResolved() : true
     }
 
     /**
@@ -147,7 +135,7 @@ class DependencyTask extends DefaultTask {
     protected boolean isTest(Configuration configuration) {
         boolean isTestConfiguration = (
                 configuration.name.startsWith(TEST_PREFIX) ||
-                configuration.name.startsWith(ANDROID_TEST_PREFIX))
+                        configuration.name.startsWith(ANDROID_TEST_PREFIX))
         configuration.hierarchy.each {
             isTestConfiguration |= TEST_COMPILE.contains(it.name)
         }
@@ -167,7 +155,7 @@ class DependencyTask extends DefaultTask {
         return isPackagedDependency
     }
 
-    protected Set<ResolvedArtifact> getResolvedArtifacts(
+    protected Set<ArtifactInfo> getResolvedArtifacts(
             Configuration configuration) {
         /**
          * skip the configurations that, cannot be resolved in
@@ -175,16 +163,38 @@ class DependencyTask extends DefaultTask {
          */
         if (!canBeResolved(configuration)
                 || isTest(configuration)
-                || !isPackagedDependency(configuration)) {
-            return null
+                || !isPackagedDependency(configuration)
+        ) {
+            return Collections.emptySet()
         }
 
         try {
             return configuration.getResolvedConfiguration()
                     .getResolvedArtifacts()
-        } catch(ResolveException exception) {
-            return null
+                    .collect(this.&resolve)
+                    .flatten() as Set
+        } catch (ResolveException exception) {
+            return Collections.emptySet()
         }
+    }
+
+    protected List<ArtifactInfo> resolve(ResolvedArtifact resolvedArtifact) {
+        String group = resolvedArtifact.moduleVersion.id.group
+        String name = resolvedArtifact.name
+        String version = resolvedArtifact.moduleVersion.id.version
+        ArtifactResolutionResult queryResult = dependencyHandler.createArtifactResolutionQuery()
+                .forModule(group, name, version)
+                .withArtifacts(MavenModule, MavenPomArtifact)
+                .execute()
+
+        List<ArtifactResult> pomResults = []
+
+        for (component in queryResult.resolvedComponents) {
+            Set<ArtifactResult> mavenPomArtifacts = component.getArtifacts(MavenPomArtifact)
+            pomResults.addAll(mavenPomArtifacts.findAll { it instanceof ResolvedArtifactResult && it.file.name == "${name}-${version}.pom" })
+        }
+
+        return pomResults.collect { new ArtifactInfo(group, name, version, it.file.absolutePath, resolvedArtifact.file.absolutePath) }
     }
 
     private void initOutput() {

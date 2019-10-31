@@ -3,12 +3,14 @@
     "group": "groupA",
     "version": "1",
     "fileLocation": "dependencies/groupA/deps1.txt",
+    "pomLocation": "dependencies/groupA/deps1.pom",
     "name": "deps1"
   },
   {
     "group": "groupB",
     "version": "2",
     "fileLocation": "dependencies/groupB/abc/deps2.txt",
+    "pomLocation": "dependencies/groupB/bcd/deps2.pom",
     "name": "deps2"
   },
   {
